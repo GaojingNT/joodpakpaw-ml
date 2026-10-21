@@ -1,34 +1,83 @@
-name: Deploy ML Service to VM
+name: Deploy
 
 on:
   push:
-    branches:
-      - main
+    branches: ["main"]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  COMPOSE_SERVICE: ml-service
 
 jobs:
-  deploy:
-    runs-on: self-hosted
-
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-    - name: Pull latest code
-      run: |
-        cd ~/CP25NK2-ML-Service
-        git fetch origin
-        git reset --hard origin/main
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Build Docker image
-      run: docker build -t catbnb-ml ~/CP25NK2-ML-Service
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Deploy container
-      run: |
-        docker rm -f catbnb-ml || true
-        docker run -d \
-          --name catbnb-ml \
-          --network catbnb-network \
-          --restart always \
-          --env-file ~/CP25NK2-ML-Service/.env \
-          -p 5000:5000 \
-          catbnb-ml
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Show logs
-      run: docker logs --tail 20 catbnb-ml
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    steps:
+      - name: Deploy to VM over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPOSE_SERVICE: ${{ env.COMPOSE_SERVICE }}
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USERNAME }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_SSH_PORT || 22 }}
+          envs: GHCR_USER,GHCR_TOKEN,COMPOSE_SERVICE
+          script: |
+            set -e
+            cd ${{ secrets.VM_DEPLOY_PATH }}
+            # Use a throwaway Docker config so the job token never replaces the VM's stored registry login
+            export DOCKER_CONFIG=$(mktemp -d)
+            trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            docker compose pull "$COMPOSE_SERVICE"
+            docker compose up -d --no-deps "$COMPOSE_SERVICE"
+            docker image prune -f
