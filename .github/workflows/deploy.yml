@@ -74,6 +74,9 @@ jobs:
           script: |
             set -e
             cd ${{ secrets.VM_DEPLOY_PATH }}
+            # Serialize deploys from all joodpakpaw repos so one prune cannot delete layers another is pulling
+            exec 9>/tmp/joodpakpaw-deploy.lock
+            flock -w 600 9
             # Use a throwaway Docker config so the job token never replaces the VM's stored registry login
             export DOCKER_CONFIG=$(mktemp -d)
             trap 'rm -rf "$DOCKER_CONFIG"' EXIT
