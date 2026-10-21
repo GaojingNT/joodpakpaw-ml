@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+env/
+DBdiagram.txt
+# Mock data
+mock_properties.csv
+mock_interactions.csv
+.pytest_cache/
